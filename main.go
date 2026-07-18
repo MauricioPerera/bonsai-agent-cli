@@ -21,9 +21,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -71,35 +75,52 @@ type GenResponse struct {
 
 // ── herramientas locales ─────────────────────────────────────────────────────
 
-// param arma el JSON-Schema de un objeto con una sola propiedad string.
-func strParam(name, desc string, required bool) map[string]any {
-	schema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			name: map[string]any{"type": "string", "description": desc},
-		},
+// prop es un par (nombre, descripción) de una propiedad string del schema.
+type prop struct{ name, desc string }
+
+// strSchema arma un JSON-Schema de objeto con propiedades string.
+func strSchema(required []string, props ...prop) map[string]any {
+	p := map[string]any{}
+	for _, x := range props {
+		p[x.name] = map[string]any{"type": "string", "description": x.desc}
 	}
-	if required {
-		schema["required"] = []string{name}
+	s := map[string]any{"type": "object", "properties": p}
+	if len(required) > 0 {
+		s["required"] = required
 	}
-	return schema
+	return s
 }
 
 var tools = []Tool{
 	{Type: "function", Function: ToolFunction{
 		Name:        "list_dir",
 		Description: "Lista archivos y carpetas de un directorio. Si no se pasa path, usa el actual.",
-		Parameters:  strParam("path", "Ruta del directorio", false),
+		Parameters:  strSchema(nil, prop{"path", "Ruta del directorio"}),
 	}},
 	{Type: "function", Function: ToolFunction{
 		Name:        "read_file",
 		Description: "Lee y devuelve el contenido de un archivo de texto.",
-		Parameters:  strParam("path", "Ruta del archivo a leer", true),
+		Parameters:  strSchema([]string{"path"}, prop{"path", "Ruta del archivo a leer"}),
+	}},
+	{Type: "function", Function: ToolFunction{
+		Name:        "glob",
+		Description: "Busca archivos por patrón. Soporta * ? [..] y ** (recursivo). Ej: *.go, src/**/*.js.",
+		Parameters:  strSchema([]string{"pattern"}, prop{"pattern", "Patrón glob a buscar"}),
+	}},
+	{Type: "function", Function: ToolFunction{
+		Name:        "http_get",
+		Description: "Hace un GET HTTP y devuelve el status, content-type y el cuerpo (truncado).",
+		Parameters:  strSchema([]string{"url"}, prop{"url", "La URL a pedir"}),
+	}},
+	{Type: "function", Function: ToolFunction{
+		Name:        "write_file",
+		Description: "Escribe (o sobrescribe) un archivo de texto con el contenido dado. El usuario confirma antes.",
+		Parameters:  strSchema([]string{"path", "content"}, prop{"path", "Ruta del archivo"}, prop{"content", "Contenido a escribir"}),
 	}},
 	{Type: "function", Function: ToolFunction{
 		Name:        "run_command",
 		Description: "Ejecuta un comando de shell en la máquina del usuario y devuelve su salida (stdout+stderr). El usuario confirma antes de correr.",
-		Parameters:  strParam("command", "El comando a ejecutar", true),
+		Parameters:  strSchema([]string{"command"}, prop{"command", "El comando a ejecutar"}),
 	}},
 }
 
@@ -148,23 +169,117 @@ func execTool(tc ToolCall, autoYes bool) string {
 		}
 		return clip(string(data))
 
+	case "glob":
+		pattern, _ := tc.Arguments["pattern"].(string)
+		if pattern == "" {
+			return "ERROR: falta 'pattern'"
+		}
+		matches, err := doGlob(pattern)
+		if err != nil {
+			return "ERROR: " + err.Error()
+		}
+		if len(matches) == 0 {
+			return "(sin coincidencias)"
+		}
+		const maxMatches = 200
+		note := ""
+		if len(matches) > maxMatches {
+			note = fmt.Sprintf("\n…(%d más)", len(matches)-maxMatches)
+			matches = matches[:maxMatches]
+		}
+		return strings.Join(matches, "\n") + note
+
+	case "http_get":
+		u, _ := tc.Arguments["url"].(string)
+		if u == "" {
+			return "ERROR: falta 'url'"
+		}
+		return httpGet(u)
+
+	case "write_file":
+		p, _ := tc.Arguments["path"].(string)
+		content, _ := tc.Arguments["content"].(string)
+		if p == "" {
+			return "ERROR: falta 'path'"
+		}
+		if !autoYes && !confirm(fmt.Sprintf("\n  ⚠  el modelo quiere ESCRIBIR %d bytes en:\n      %s\n  ¿permitir? [y/N] ", len(content), p)) {
+			return "El usuario DENEGÓ la escritura de este archivo."
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			return "ERROR: " + err.Error()
+		}
+		return fmt.Sprintf("OK: escrito %s (%d bytes)", p, len(content))
+
 	case "run_command":
 		command, _ := tc.Arguments["command"].(string)
 		if command == "" {
 			return "ERROR: falta 'command'"
 		}
-		if !autoYes {
-			fmt.Printf("\n  ⚠  el modelo quiere ejecutar:\n      %s\n  ¿permitir? [y/N] ", command)
-			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-			if strings.TrimSpace(strings.ToLower(line)) != "y" {
-				return "El usuario DENEGÓ la ejecución de este comando."
-			}
+		if !autoYes && !confirm(fmt.Sprintf("\n  ⚠  el modelo quiere ejecutar:\n      %s\n  ¿permitir? [y/N] ", command)) {
+			return "El usuario DENEGÓ la ejecución de este comando."
 		}
 		return clip(runShell(command))
 
 	default:
 		return "ERROR: herramienta desconocida: " + tc.Name
 	}
+}
+
+// confirm muestra el mensaje y devuelve true si el usuario tipeó "y".
+func confirm(msg string) bool {
+	fmt.Print(msg)
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	return strings.TrimSpace(strings.ToLower(line)) == "y"
+}
+
+// doGlob busca archivos por patrón. Soporta ** (recursivo) además de lo que
+// entiende path.Match (* ? [..]). filepath.Glob no hace **, así que para esos
+// patrones caminamos el árbol y matcheamos el sufijo de segmentos.
+func doGlob(pattern string) ([]string, error) {
+	pattern = filepath.ToSlash(pattern)
+	if i := strings.Index(pattern, "**/"); i >= 0 {
+		base := strings.TrimSuffix(pattern[:i], "/")
+		if base == "" {
+			base = "."
+		}
+		rest := pattern[i+3:]
+		restN := strings.Count(rest, "/") + 1
+		var matches []string
+		err := filepath.WalkDir(base, func(pth string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			segs := strings.Split(filepath.ToSlash(pth), "/")
+			if len(segs) >= restN {
+				tail := strings.Join(segs[len(segs)-restN:], "/")
+				if ok, _ := path.Match(rest, tail); ok {
+					matches = append(matches, filepath.ToSlash(pth))
+				}
+			}
+			return nil
+		})
+		return matches, err
+	}
+	m, err := filepath.Glob(filepath.FromSlash(pattern))
+	for i := range m {
+		m[i] = filepath.ToSlash(m[i])
+	}
+	return m, err
+}
+
+// httpGet hace un GET y devuelve status + content-type + cuerpo (truncado).
+func httpGet(u string) string {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(u)
+	if err != nil {
+		return "ERROR: " + err.Error()
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxToolOutput+1))
+	if err != nil {
+		return "ERROR: " + err.Error()
+	}
+	return fmt.Sprintf("HTTP %d · %s\n%s", resp.StatusCode, resp.Header.Get("Content-Type"), clip(string(body)))
 }
 
 func runShell(command string) string {
@@ -193,8 +308,11 @@ func runShell(command string) string {
 const systemPrompt = `Sos un agente que corre en la máquina del usuario. Disponés de estas herramientas, que se ejecutan en su equipo:
 - list_dir(path): lista un directorio.
 - read_file(path): lee un archivo de texto.
+- glob(pattern): busca archivos por patrón (soporta ** recursivo).
+- http_get(url): hace un GET HTTP y devuelve el cuerpo.
+- write_file(path, content): escribe un archivo (el usuario lo confirma).
 - run_command(command): ejecuta un comando de shell (el usuario lo confirma).
-Usalas cuando necesites información real del sistema o correr algo. No inventes el contenido de archivos ni la salida de comandos: pedilos con las herramientas. Cuando tengas la respuesta, contestá en español, breve y claro, SIN más tool calls.`
+Usalas cuando necesites información real del sistema, buscar archivos, traer algo de la web o escribir/correr algo. No inventes contenidos, resultados ni respuestas de red: pedilos con las herramientas. Cuando tengas la respuesta, contestá en español, breve y claro, SIN más tool calls.`
 
 func generate(client *http.Client, url, secret string, req GenRequest) (*GenResponse, error) {
 	body, _ := json.Marshal(req)

@@ -46,10 +46,14 @@ cargado** y el secreto pegado (es el worker que genera). Verificá con
 |------|----------|--------------|
 | `list_dir(path)` | lista un directorio (default: el actual) | no (solo lectura) |
 | `read_file(path)` | lee un archivo de texto | no (solo lectura) |
+| `glob(pattern)` | busca archivos por patrón — `*`, `?`, `[..]` y `**` recursivo (ej: `**/*.go`) | no (solo lectura) |
+| `http_get(url)` | hace un GET HTTP y devuelve status + content-type + cuerpo | no (solo lectura) |
+| `write_file(path, content)` | escribe/sobrescribe un archivo de texto | **sí, `[y/N]`** (salvo `--yes`) |
 | `run_command(command)` | ejecuta un comando de shell y devuelve su salida | **sí, `[y/N]`** (salvo `--yes`) |
 
 `run_command` usa `cmd /c` en Windows y `sh -c` en el resto. La salida se
-trunca a 8 KB por herramienta para no saturar el contexto.
+trunca a 8 KB por herramienta (y `http_get` limita el cuerpo a lo mismo) para no
+saturar el contexto. `glob` devuelve como máximo 200 coincidencias.
 
 ## Cómo funciona el loop
 
@@ -62,8 +66,11 @@ trunca a 8 KB por herramienta para no saturar el contexto.
 
 ## Seguridad
 
-- `run_command` pide confirmación `[y/N]` mostrando el comando exacto antes de
-  correrlo. `--yes` lo desactiva — usalo solo si sabés qué vas a pedir.
+- Las herramientas que **modifican tu sistema** — `run_command` y `write_file` —
+  piden confirmación `[y/N]` mostrando qué van a hacer (el comando exacto, o el
+  path y cuántos bytes) antes de tocar nada. `--yes` desactiva esas preguntas —
+  usalo solo si sabés qué vas a pedir. Las de solo lectura (`list_dir`,
+  `read_file`, `glob`, `http_get`) corren sin preguntar.
 - El modelo no ejecuta nada: propone, vos (o `--yes`) autorizás, el binario corre.
 
 ## No incluido / atribución
