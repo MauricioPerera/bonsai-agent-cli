@@ -10,10 +10,11 @@
 //	set BONSAI_SECRET=...           (el API_SECRET del deploy)
 //	bonsai-agent "¿qué archivos hay acá y de qué trata el proyecto?"   (one-shot)
 //	bonsai-agent --chat            (chat interactivo: mantiene la conversación)
+//	bonsai-agent --stream "..."    (imprime la respuesta a medida que se genera)
 //	bonsai-agent --yes "corré los tests"   (--yes: no pide confirmación de shell)
 //
 // Modos: con prompt y sin --chat es one-shot; sin prompt o con --chat/-c entra
-// al chat (comandos /exit, /reset, /help).
+// al chat (comandos /exit, /reset, /help). --stream/-s se combina con cualquiera.
 package main
 
 import (
@@ -56,6 +57,7 @@ type GenRequest struct {
 	Messages []Message `json:"messages"`
 	Tools    []Tool    `json:"tools,omitempty"`
 	Think    bool      `json:"think,omitempty"`
+	Stream   bool      `json:"stream,omitempty"`
 }
 
 type ToolCall struct {
@@ -452,32 +454,133 @@ func generate(client *http.Client, url, secret string, req GenRequest) (*GenResp
 	return &out, nil
 }
 
-// runTurn corre el loop de tool-calling para el estado actual de `messages`
-// (que ya incluye el nuevo mensaje del usuario) y devuelve el historial
-// actualizado —con el turno assistant final agregado, para mantener el hilo— y
-// el texto de la respuesta final.
-func runTurn(client *http.Client, url, secret string, messages []Message, autoYes bool) ([]Message, string, error) {
+// generateStream pide con stream:true y consume el SSE, llamando onDelta con
+// cada fragmento de texto a medida que llega. Devuelve el resultado final
+// (texto completo + tool_calls + assistant) al recibir el evento done.
+func generateStream(client *http.Client, url, secret string, req GenRequest, onDelta func(string)) (*GenResponse, error) {
+	req.Stream = true
+	body, _ := json.Marshal(req)
+	httpReq, err := http.NewRequest("POST", url+"/api/generate", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+secret)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var e GenResponse
+		json.NewDecoder(resp.Body).Decode(&e)
+		if e.Error != "" {
+			return nil, fmt.Errorf("%s", e.Error)
+		}
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	var full strings.Builder
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(line[len("data:"):])
+		if data == "" {
+			continue
+		}
+		var ev struct {
+			Delta     string     `json:"delta"`
+			Done      bool       `json:"done"`
+			Think     string     `json:"think"`
+			ToolCalls []ToolCall `json:"tool_calls"`
+			Assistant string     `json:"assistant"`
+			Error     string     `json:"error"`
+		}
+		if json.Unmarshal([]byte(data), &ev) != nil {
+			continue
+		}
+		if ev.Error != "" {
+			return nil, fmt.Errorf("%s", ev.Error)
+		}
+		if ev.Delta != "" {
+			full.WriteString(ev.Delta)
+			onDelta(ev.Delta)
+		}
+		if ev.Done {
+			return &GenResponse{
+				Text:      full.String(),
+				Think:     ev.Think,
+				ToolCalls: ev.ToolCalls,
+				Assistant: ev.Assistant,
+			}, nil
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return &GenResponse{Text: full.String()}, nil // el stream cerró sin 'done'
+}
+
+// runTurn corre el loop de tool-calling para el estado actual de `messages` (que
+// ya incluye el mensaje del usuario). Imprime la respuesta final —en streaming a
+// medida que llega si stream=true, o de una si no— y devuelve el historial
+// actualizado con el turno assistant agregado, para mantener el hilo.
+func runTurn(client *http.Client, url, secret string, messages []Message, autoYes, stream bool) ([]Message, error) {
 	const maxTurns = 8
 	for turn := 1; turn <= maxTurns; turn++ {
-		fmt.Printf("\x1b[90m· pensando…\x1b[0m\n")
-		resp, err := generate(client, url, secret, GenRequest{Messages: messages, Tools: tools})
+		var resp *GenResponse
+		var err error
+		printed := false // ¿se imprimió texto ya (streaming)?
+
+		if stream {
+			resp, err = generateStream(client, url, secret, GenRequest{Messages: messages, Tools: tools}, func(d string) {
+				if !printed {
+					printed = true
+					fmt.Print("\x1b[1m")
+				}
+				fmt.Print(d)
+			})
+			if printed {
+				fmt.Print("\x1b[0m")
+			}
+		} else {
+			fmt.Print("\x1b[90m· pensando…\x1b[0m\n")
+			resp, err = generate(client, url, secret, GenRequest{Messages: messages, Tools: tools})
+		}
 		if err != nil {
-			return messages, "", err
+			return messages, err
 		}
 		if resp.Error != "" {
-			return messages, "", fmt.Errorf("API: %s", resp.Error)
+			return messages, fmt.Errorf("API: %s", resp.Error)
 		}
 		if resp.Warning != "" {
-			fmt.Println("  ⚠ " + resp.Warning)
+			fmt.Println("\n  ⚠ " + resp.Warning)
 		}
 
-		// El turno assistant va VERBATIM (campo `assistant` de la API), siempre:
-		// tanto para continuar un round-trip de tools como para dejar la respuesta
-		// final en el historial y mantener el contexto entre turnos.
+		// El turno assistant va VERBATIM (campo `assistant` de la API): tanto para
+		// continuar un round-trip de tools como para dejar la respuesta final en el
+		// historial y mantener el contexto entre turnos.
 		messages = append(messages, Message{Role: "assistant", Content: resp.Assistant})
 
 		if len(resp.ToolCalls) == 0 {
-			return messages, strings.TrimSpace(resp.Text), nil
+			if stream {
+				if printed {
+					fmt.Println()
+				} else {
+					fmt.Println("\x1b[90m(sin texto)\x1b[0m")
+				}
+			} else {
+				fmt.Println("\x1b[1m" + strings.TrimSpace(resp.Text) + "\x1b[0m")
+			}
+			return messages, nil
+		}
+		if stream && printed {
+			fmt.Println() // cerrar la línea del texto parcial antes de las tools
 		}
 		for _, tc := range resp.ToolCalls {
 			args, _ := json.Marshal(tc.Arguments)
@@ -487,7 +590,7 @@ func runTurn(client *http.Client, url, secret string, messages []Message, autoYe
 			messages = append(messages, Message{Role: "tool", Content: result})
 		}
 	}
-	return messages, "", fmt.Errorf("se alcanzó el máximo de turnos sin respuesta final")
+	return messages, fmt.Errorf("se alcanzó el máximo de turnos sin respuesta final")
 }
 
 func main() {
@@ -497,7 +600,7 @@ func main() {
 		fatal("falta BONSAI_SECRET (el API_SECRET del deploy). Ej: set BONSAI_SECRET=tu-secreto")
 	}
 
-	autoYes, chat := false, false
+	autoYes, chat, stream := false, false, false
 	var parts []string
 	for _, a := range os.Args[1:] {
 		switch a {
@@ -505,6 +608,8 @@ func main() {
 			autoYes = true
 		case "--chat", "-c":
 			chat = true
+		case "--stream", "-s":
+			stream = true
 		default:
 			parts = append(parts, a)
 		}
@@ -517,11 +622,9 @@ func main() {
 	// One-shot: hay prompt y NO se pidió chat.
 	if prompt != "" && !chat {
 		messages = append(messages, Message{Role: "user", Content: prompt})
-		_, text, err := runTurn(client, url, secret, messages, autoYes)
-		if err != nil {
+		if _, err := runTurn(client, url, secret, messages, autoYes, stream); err != nil {
 			fatal(err.Error())
 		}
-		fmt.Println("\n\x1b[1m" + text + "\x1b[0m")
 		return
 	}
 
@@ -559,7 +662,7 @@ func main() {
 		}
 
 		messages = append(messages, Message{Role: "user", Content: line})
-		updated, text, err := runTurn(client, url, secret, messages, autoYes)
+		updated, err := runTurn(client, url, secret, messages, autoYes, stream)
 		if err != nil {
 			fmt.Println("\x1b[31merror:\x1b[0m " + err.Error())
 			// deshacer el user message fallido para no dejar el hilo inconsistente
@@ -567,7 +670,7 @@ func main() {
 			continue
 		}
 		messages = updated
-		fmt.Println("\x1b[1m" + text + "\x1b[0m\n")
+		fmt.Println()
 	}
 }
 

@@ -29,7 +29,15 @@ bonsai-agent.exe --yes "corré go version"           # --yes: no pregunta antes 
 # chat interactivo (mantiene la conversación)
 bonsai-agent.exe --chat
 bonsai-agent.exe -c "arrancá averiguando qué proyecto es este"   # con un primer turno
+
+# streaming: imprime la respuesta a medida que se genera (SSE)
+bonsai-agent.exe --stream "escribime un haiku sobre bonsáis"
+bonsai-agent.exe -c -s                                           # chat + streaming
 ```
+
+`--stream`/`-s` se combina con one-shot o `--chat`. La API es síncrona por
+defecto; con `stream:true` el worker publica el texto parcial y `/api/generate`
+lo relaya por **Server-Sent Events**.
 
 **Modos:** con prompt y sin `--chat` es one-shot; sin prompt (o con `--chat`/`-c`)
 entra al chat interactivo, que **recuerda la conversación** entre turnos —incluidos
