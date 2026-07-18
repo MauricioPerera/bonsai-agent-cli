@@ -153,7 +153,7 @@ var okfTools = []Tool{
 	}},
 	{Type: "function", Function: ToolFunction{
 		Name:        "okf_search",
-		Description: "Busca un regex dentro del bundle OKF (tipo grep). Devuelve archivo:línea: contenido.",
+		Description: "Busca un regex dentro del CUERPO de los conceptos del bundle (tipo grep). Para saber qué conceptos existen o su title/type/description, usá el índice del system prompt — NO esto.",
 		Parameters:  strSchema([]string{"pattern"}, prop{"pattern", "Patrón regex a buscar en el bundle"}),
 	}},
 	{Type: "function", Function: ToolFunction{
@@ -598,9 +598,9 @@ func buildOKFIndex() string {
 
 // okfSystemAddon es lo que se suma al system prompt: el índice + cómo usar las tools.
 func okfSystemAddon() string {
-	return "\n\nTenés un bundle de conocimiento OKF montado como contexto. Índice de conceptos (leé el que necesites con okf_read; NO inventes su contenido):\n" +
+	return "\n\nTenés un bundle de conocimiento OKF montado como contexto. El índice de abajo es COMPLETO: lista TODOS los conceptos con su type, título y descripción. Para preguntas sobre qué conceptos hay, o su título/type/descripción, respondé directo desde este índice — NO llames a okf_search ni okf_read para eso (ya tenés la info acá).\n\nÍndice de conceptos:\n" +
 		buildOKFIndex() +
-		"\nBuscá dentro del bundle con okf_search. Curá el conocimiento con okf_write (crear/actualizar un concepto; type es obligatorio) y okf_log (anotar un cambio). Cuando aprendas algo reutilizable, guardalo como concepto."
+		"\nUsá okf_read(path) SOLO cuando necesites el CUERPO o el detalle de un concepto puntual. Usá okf_search(pattern) SOLO para encontrar un texto DENTRO de los cuerpos. Curá el conocimiento con okf_write (crear/actualizar; type obligatorio) y okf_log (anotar un cambio); guardá lo reutilizable como concepto."
 }
 
 // buildOKFDoc arma un concepto OKF válido (frontmatter con type obligatorio +
