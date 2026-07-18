@@ -124,6 +124,11 @@ var tools = []Tool{
 		Parameters:  strSchema([]string{"path", "content"}, prop{"path", "Ruta del archivo"}, prop{"content", "Contenido a escribir"}),
 	}},
 	{Type: "function", Function: ToolFunction{
+		Name:        "edit_file",
+		Description: "Reemplaza UN fragmento exacto en un archivo (old -> new). 'old' debe coincidir literal (con espacios/saltos) y ser único en el archivo. El usuario confirma antes.",
+		Parameters:  strSchema([]string{"path", "old", "new"}, prop{"path", "Ruta del archivo"}, prop{"old", "Texto exacto a reemplazar (único en el archivo)"}, prop{"new", "Texto nuevo (vacío = borra el fragmento)"}),
+	}},
+	{Type: "function", Function: ToolFunction{
 		Name:        "run_command",
 		Description: "Ejecuta un comando de shell en la máquina del usuario y devuelve su salida (stdout+stderr). El usuario confirma antes de correr.",
 		Parameters:  strSchema([]string{"command"}, prop{"command", "El comando a ejecutar"}),
@@ -226,6 +231,38 @@ func execTool(tc ToolCall, autoYes bool) string {
 			return "ERROR: " + err.Error()
 		}
 		return fmt.Sprintf("OK: escrito %s (%d bytes)", p, len(content))
+
+	case "edit_file":
+		p, _ := tc.Arguments["path"].(string)
+		oldS, _ := tc.Arguments["old"].(string)
+		newS, _ := tc.Arguments["new"].(string)
+		if p == "" {
+			return "ERROR: falta 'path'"
+		}
+		if oldS == "" {
+			return "ERROR: falta 'old' (el texto exacto a reemplazar)"
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return "ERROR: " + err.Error()
+		}
+		content := string(data)
+		switch strings.Count(content, oldS) {
+		case 0:
+			return "ERROR: 'old' no aparece en el archivo (debe coincidir literal, incluidos espacios y saltos de línea)."
+		case 1:
+			// ok
+		default:
+			return fmt.Sprintf("ERROR: 'old' aparece %d veces; debe ser único. Agregá contexto alrededor para desambiguar.", strings.Count(content, oldS))
+		}
+		if !autoYes && !confirm(fmt.Sprintf("\n  ⚠  el modelo quiere REEMPLAZAR en %s:\n      - %s\n      + %s\n  ¿permitir? [y/N] ", p, oneLine(oldS, 90), oneLine(newS, 90))) {
+			return "El usuario DENEGÓ la edición de este archivo."
+		}
+		updated := strings.Replace(content, oldS, newS, 1)
+		if err := os.WriteFile(p, []byte(updated), 0o644); err != nil {
+			return "ERROR: " + err.Error()
+		}
+		return fmt.Sprintf("OK: reemplazado 1 fragmento en %s (%d → %d bytes)", p, len(content), len(updated))
 
 	case "run_command":
 		command, _ := tc.Arguments["command"].(string)
@@ -390,7 +427,8 @@ const systemPrompt = `Sos un agente que corre en la máquina del usuario. Dispon
 - glob(pattern): busca archivos por patrón (soporta ** recursivo).
 - search(pattern, path): busca un regex DENTRO de archivos (tipo grep), recursivo.
 - http_get(url): hace un GET HTTP y devuelve el cuerpo.
-- write_file(path, content): escribe un archivo (el usuario lo confirma).
+- write_file(path, content): escribe/sobrescribe un archivo (el usuario lo confirma).
+- edit_file(path, old, new): reemplaza un fragmento exacto y único de un archivo (el usuario lo confirma).
 - run_command(command): ejecuta un comando de shell (el usuario lo confirma).
 Usalas cuando necesites información real del sistema, buscar archivos, traer algo de la web o escribir/correr algo. No inventes contenidos, resultados ni respuestas de red: pedilos con las herramientas. Cuando tengas la respuesta, contestá en español, breve y claro, SIN más tool calls.`
 

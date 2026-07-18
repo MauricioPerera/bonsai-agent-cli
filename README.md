@@ -50,6 +50,7 @@ cargado** y el secreto pegado (es el worker que genera). Verificá con
 | `search(pattern, path)` | busca un regex (RE2) *dentro* de archivos, recursivo — devuelve `archivo:línea: contenido` | no (solo lectura) |
 | `http_get(url)` | hace un GET HTTP y devuelve status + content-type + cuerpo | no (solo lectura) |
 | `write_file(path, content)` | escribe/sobrescribe un archivo de texto | **sí, `[y/N]`** (salvo `--yes`) |
+| `edit_file(path, old, new)` | reemplaza un fragmento exacto y **único** (`old` debe coincidir literal); muestra un diff | **sí, `[y/N]`** (salvo `--yes`) |
 | `run_command(command)` | ejecuta un comando de shell y devuelve su salida | **sí, `[y/N]`** (salvo `--yes`) |
 
 `run_command` usa `cmd /c` en Windows y `sh -c` en el resto. La salida se
@@ -69,11 +70,12 @@ máximo 100 líneas y salta `.git`, `node_modules`, binarios y archivos de más 
 
 ## Seguridad
 
-- Las herramientas que **modifican tu sistema** — `run_command` y `write_file` —
-  piden confirmación `[y/N]` mostrando qué van a hacer (el comando exacto, o el
-  path y cuántos bytes) antes de tocar nada. `--yes` desactiva esas preguntas —
-  usalo solo si sabés qué vas a pedir. Las de solo lectura (`list_dir`,
-  `read_file`, `glob`, `http_get`) corren sin preguntar.
+- Las herramientas que **modifican tu sistema** — `run_command`, `write_file` y
+  `edit_file` — piden confirmación `[y/N]` mostrando qué van a hacer (el comando
+  exacto, el path y bytes, o el diff `- old / + new`) antes de tocar nada.
+  `--yes` desactiva esas preguntas — usalo solo si sabés qué vas a pedir. Las de
+  solo lectura (`list_dir`, `read_file`, `glob`, `search`, `http_get`) corren sin
+  preguntar.
 - El modelo no ejecuta nada: propone, vos (o `--yes`) autorizás, el binario corre.
 
 ## No incluido / atribución
