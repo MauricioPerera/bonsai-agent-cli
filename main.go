@@ -600,7 +600,7 @@ func buildOKFIndex() string {
 func okfSystemAddon() string {
 	return "\n\nTenés un bundle de conocimiento OKF montado como contexto. El índice de abajo es COMPLETO: lista TODOS los conceptos con su type, título y descripción. Para preguntas sobre qué conceptos hay, o su título/type/descripción, respondé directo desde este índice — NO llames a okf_search ni okf_read para eso (ya tenés la info acá).\n\nÍndice de conceptos:\n" +
 		buildOKFIndex() +
-		"\nUsá okf_read(path) SOLO cuando necesites el CUERPO o el detalle de un concepto puntual. Usá okf_search(pattern) SOLO para encontrar un texto DENTRO de los cuerpos. Curá el conocimiento con okf_write (crear/actualizar; type obligatorio) y okf_log (anotar un cambio); guardá lo reutilizable como concepto."
+		"\nUsá okf_read(path) SOLO cuando necesites el CUERPO o el detalle de un concepto puntual. Usá okf_search(pattern) SOLO para encontrar un texto DENTRO de los cuerpos. Cuando el usuario te pida GUARDAR, CREAR, ACTUALIZAR o ANOTAR algo, HACELO con la herramienta (okf_write / okf_log) en esa misma respuesta — no describas el concepto en prosa ni digas que lo vas a hacer: llamá a la herramienta. Guardá como concepto lo reutilizable."
 }
 
 // buildOKFDoc arma un concepto OKF válido (frontmatter con type obligatorio +
