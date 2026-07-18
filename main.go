@@ -652,6 +652,32 @@ func okfAppendLog(entry string) string {
 	return "OK: anotado en log.md — " + strings.TrimRight(line, "\n")
 }
 
+// saveHints: pistas de que el usuario pidió persistir algo en el bundle OKF.
+var saveHints = []string{
+	"guard", "anot", "registr", "actualiz", "persist", "sav",
+	"nuevo concepto", "concepto nuevo", "crea un concepto", "creá un concepto",
+	"crear concepto", "crea concepto", "creá concepto", "documentá", "documenta esto",
+}
+
+// lastUserWantsSave mira el último mensaje del usuario y devuelve true si parece
+// pedir guardar/crear/actualizar/anotar en el bundle. Heurística: un falso
+// positivo solo cuesta un turno extra (el nudge dice "si no corresponde, seguí").
+func lastUserWantsSave(messages []Message) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != "user" {
+			continue
+		}
+		low := strings.ToLower(messages[i].Content)
+		for _, h := range saveHints {
+			if strings.Contains(low, h) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
 func runShell(command string) string {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
@@ -784,6 +810,10 @@ func generateStream(client *http.Client, url, secret string, req GenRequest, onD
 // actualizado con el turno assistant agregado, para mantener el hilo.
 func runTurn(client *http.Client, url, secret string, messages []Message, autoYes, stream bool) ([]Message, error) {
 	const maxTurns = 8
+	// Si hay bundle OKF y el usuario pidió guardar, pero el modelo termina sin
+	// tocar una tool de escritura, lo empujamos una vez a usar la herramienta.
+	wantsSave := okfDir != "" && lastUserWantsSave(messages)
+	nudged, savedAlready := false, false
 	for turn := 1; turn <= maxTurns; turn++ {
 		var resp *GenResponse
 		var err error
@@ -820,6 +850,17 @@ func runTurn(client *http.Client, url, secret string, messages []Message, autoYe
 		messages = append(messages, Message{Role: "assistant", Content: resp.Assistant})
 
 		if len(resp.ToolCalls) == 0 {
+			// Pidió guardar y no se llamó ninguna herramienta de escritura: un
+			// empujón, una sola vez, y reintentamos el turno.
+			if wantsSave && !savedAlready && !nudged {
+				nudged = true
+				if stream && printed {
+					fmt.Println()
+				}
+				fmt.Println("\x1b[90m· (pediste guardar y no se llamó ninguna herramienta — reintentando)\x1b[0m")
+				messages = append(messages, Message{Role: "user", Content: "No llamaste a ninguna herramienta. Si mi pedido era guardar/crear/actualizar/anotar algo en el bundle OKF, HACELO AHORA con okf_write u okf_log (no lo describas en texto). Si ya lo hiciste o no corresponde guardar nada, respondé normalmente."})
+				continue
+			}
 			if stream {
 				if printed {
 					fmt.Println()
@@ -835,6 +876,9 @@ func runTurn(client *http.Client, url, secret string, messages []Message, autoYe
 			fmt.Println() // cerrar la línea del texto parcial antes de las tools
 		}
 		for _, tc := range resp.ToolCalls {
+			if tc.Name == "okf_write" || tc.Name == "okf_log" {
+				savedAlready = true
+			}
 			args, _ := json.Marshal(tc.Arguments)
 			fmt.Printf("\x1b[36m  → %s(%s)\x1b[0m\n", tc.Name, string(args))
 			result := execTool(tc, autoYes)

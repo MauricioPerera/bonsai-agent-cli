@@ -114,6 +114,11 @@ Tools que se activan solo con `--okf`:
 Las rutas están confinadas al bundle (no se escapa con `../`). Hay un bundle de
 ejemplo en [`example-okf/`](example-okf).
 
+**Red de seguridad:** si pedís guardar/crear/actualizar/anotar y el modelo
+responde sin llamar ninguna herramienta de escritura (a veces el 27B narra en
+vez de actuar), el agente lo empuja una vez y reintenta el turno. Verás
+`· (pediste guardar y no se llamó ninguna herramienta — reintentando)`.
+
 ## Cómo funciona
 
 1. Manda `{messages, tools}` a `POST /api/generate` (con `stream:true` si `-s`).
