@@ -21,12 +21,20 @@ go build -o bonsai-agent.exe .
 set BONSAI_SECRET=tu-secreto           # el API_SECRET del deploy
 # opcional: set BONSAI_URL=https://bonsai-agent-lab.pages.dev   (es el default)
 
+# one-shot (una pregunta, una respuesta)
 bonsai-agent.exe "listá los archivos de esta carpeta y decime de qué trata el proyecto"
 bonsai-agent.exe "¿qué versión de go tengo?"        # pedirá confirmación para el shell
 bonsai-agent.exe --yes "corré go version"           # --yes: no pregunta antes del shell
+
+# chat interactivo (mantiene la conversación)
+bonsai-agent.exe --chat
+bonsai-agent.exe -c "arrancá averiguando qué proyecto es este"   # con un primer turno
 ```
 
-Sin argumentos, pide el prompt por stdin.
+**Modos:** con prompt y sin `--chat` es one-shot; sin prompt (o con `--chat`/`-c`)
+entra al chat interactivo, que **recuerda la conversación** entre turnos —incluidos
+los resultados de las herramientas. Comandos dentro del chat: `/exit`, `/reset`
+(borra el historial), `/help`.
 
 Necesita una pestaña de `bonsai-agent-lab.pages.dev` abierta con el **modelo
 cargado** y el secreto pegado (es el worker que genera). Verificá con

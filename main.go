@@ -8,8 +8,12 @@
 // Uso:
 //
 //	set BONSAI_SECRET=...           (el API_SECRET del deploy)
-//	bonsai-agent "¿qué archivos hay acá y de qué trata el proyecto?"
+//	bonsai-agent "¿qué archivos hay acá y de qué trata el proyecto?"   (one-shot)
+//	bonsai-agent --chat            (chat interactivo: mantiene la conversación)
 //	bonsai-agent --yes "corré los tests"   (--yes: no pide confirmación de shell)
+//
+// Modos: con prompt y sin --chat es one-shot; sin prompt o con --chat/-c entra
+// al chat (comandos /exit, /reset, /help).
 package main
 
 import (
@@ -212,62 +216,33 @@ func generate(client *http.Client, url, secret string, req GenRequest) (*GenResp
 	return &out, nil
 }
 
-func main() {
-	url := envOr("BONSAI_URL", "https://bonsai-agent-lab.pages.dev")
-	secret := os.Getenv("BONSAI_SECRET")
-	if secret == "" {
-		fatal("falta BONSAI_SECRET (el API_SECRET del deploy). Ej: set BONSAI_SECRET=tu-secreto")
-	}
-
-	autoYes := false
-	var parts []string
-	for _, a := range os.Args[1:] {
-		switch a {
-		case "--yes", "-y":
-			autoYes = true
-		default:
-			parts = append(parts, a)
-		}
-	}
-	prompt := strings.TrimSpace(strings.Join(parts, " "))
-	if prompt == "" {
-		fmt.Print("prompt> ")
-		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-		prompt = strings.TrimSpace(line)
-	}
-	if prompt == "" {
-		fatal("prompt vacío")
-	}
-
-	messages := []Message{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: prompt},
-	}
-
-	client := &http.Client{Timeout: 6 * time.Minute}
+// runTurn corre el loop de tool-calling para el estado actual de `messages`
+// (que ya incluye el nuevo mensaje del usuario) y devuelve el historial
+// actualizado —con el turno assistant final agregado, para mantener el hilo— y
+// el texto de la respuesta final.
+func runTurn(client *http.Client, url, secret string, messages []Message, autoYes bool) ([]Message, string, error) {
 	const maxTurns = 8
-
 	for turn := 1; turn <= maxTurns; turn++ {
-		fmt.Printf("\x1b[90m· pensando (turno %d)…\x1b[0m\n", turn)
+		fmt.Printf("\x1b[90m· pensando…\x1b[0m\n")
 		resp, err := generate(client, url, secret, GenRequest{Messages: messages, Tools: tools})
 		if err != nil {
-			fatal(err.Error())
+			return messages, "", err
 		}
 		if resp.Error != "" {
-			fatal("API: " + resp.Error)
+			return messages, "", fmt.Errorf("API: %s", resp.Error)
 		}
 		if resp.Warning != "" {
 			fmt.Println("  ⚠ " + resp.Warning)
 		}
 
-		if len(resp.ToolCalls) == 0 {
-			fmt.Println("\n\x1b[1m" + strings.TrimSpace(resp.Text) + "\x1b[0m")
-			return
-		}
-
-		// Continuar el round-trip: el turno assistant va VERBATIM (el campo
-		// `assistant` que devuelve la API) y después un {role:"tool"} por llamada.
+		// El turno assistant va VERBATIM (campo `assistant` de la API), siempre:
+		// tanto para continuar un round-trip de tools como para dejar la respuesta
+		// final en el historial y mantener el contexto entre turnos.
 		messages = append(messages, Message{Role: "assistant", Content: resp.Assistant})
+
+		if len(resp.ToolCalls) == 0 {
+			return messages, strings.TrimSpace(resp.Text), nil
+		}
 		for _, tc := range resp.ToolCalls {
 			args, _ := json.Marshal(tc.Arguments)
 			fmt.Printf("\x1b[36m  → %s(%s)\x1b[0m\n", tc.Name, string(args))
@@ -276,7 +251,88 @@ func main() {
 			messages = append(messages, Message{Role: "tool", Content: result})
 		}
 	}
-	fmt.Println("\n(se alcanzó el máximo de turnos sin respuesta final)")
+	return messages, "", fmt.Errorf("se alcanzó el máximo de turnos sin respuesta final")
+}
+
+func main() {
+	url := envOr("BONSAI_URL", "https://bonsai-agent-lab.pages.dev")
+	secret := os.Getenv("BONSAI_SECRET")
+	if secret == "" {
+		fatal("falta BONSAI_SECRET (el API_SECRET del deploy). Ej: set BONSAI_SECRET=tu-secreto")
+	}
+
+	autoYes, chat := false, false
+	var parts []string
+	for _, a := range os.Args[1:] {
+		switch a {
+		case "--yes", "-y":
+			autoYes = true
+		case "--chat", "-c":
+			chat = true
+		default:
+			parts = append(parts, a)
+		}
+	}
+	prompt := strings.TrimSpace(strings.Join(parts, " "))
+
+	client := &http.Client{Timeout: 6 * time.Minute}
+	messages := []Message{{Role: "system", Content: systemPrompt}}
+
+	// One-shot: hay prompt y NO se pidió chat.
+	if prompt != "" && !chat {
+		messages = append(messages, Message{Role: "user", Content: prompt})
+		_, text, err := runTurn(client, url, secret, messages, autoYes)
+		if err != nil {
+			fatal(err.Error())
+		}
+		fmt.Println("\n\x1b[1m" + text + "\x1b[0m")
+		return
+	}
+
+	// Chat interactivo: mantiene la conversación (el mismo `messages`) entre turnos.
+	fmt.Println("\x1b[1mbonsai-agent\x1b[0m · chat — \x1b[90m/exit para salir · /reset borra el historial · /help\x1b[0m")
+	reader := bufio.NewReader(os.Stdin)
+	pending := prompt // si vino con -c "…", ese es el primer turno
+	for {
+		var line string
+		if pending != "" {
+			line, pending = pending, ""
+			fmt.Println("\x1b[32myo>\x1b[0m " + line)
+		} else {
+			fmt.Print("\x1b[32myo>\x1b[0m ")
+			l, err := reader.ReadString('\n')
+			if err != nil { // EOF (Ctrl+Z en Windows, Ctrl+D en Unix)
+				fmt.Println()
+				return
+			}
+			line = strings.TrimSpace(l)
+		}
+		if line == "" {
+			continue
+		}
+		switch line {
+		case "/exit", "/quit":
+			return
+		case "/reset":
+			messages = []Message{{Role: "system", Content: systemPrompt}}
+			fmt.Println("\x1b[90m(historial reiniciado)\x1b[0m")
+			continue
+		case "/help":
+			fmt.Println("\x1b[90mcomandos: /exit · /reset · /help. Tools: list_dir, read_file, run_command ([y/N]).\x1b[0m")
+			continue
+		}
+
+		messages = append(messages, Message{Role: "user", Content: line})
+		updated, text, err := runTurn(client, url, secret, messages, autoYes)
+		if err != nil {
+			fmt.Println("\x1b[31merror:\x1b[0m " + err.Error())
+			// deshacer el user message fallido para no dejar el hilo inconsistente
+			messages = messages[:len(messages)-1]
+			continue
+		}
+		messages = updated
+		fmt.Println("\x1b[1m" + text + "\x1b[0m\n")
+	}
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
