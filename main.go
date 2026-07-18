@@ -11,6 +11,7 @@
 //	bonsai-agent "¿qué archivos hay acá y de qué trata el proyecto?"   (one-shot)
 //	bonsai-agent --chat            (chat interactivo: mantiene la conversación)
 //	bonsai-agent --stream "..."    (imprime la respuesta a medida que se genera)
+//	bonsai-agent --okf ./kb "..."  (monta un bundle OKF como contexto/memoria)
 //	bonsai-agent --yes "corré los tests"   (--yes: no pide confirmación de shell)
 //
 // Modos: con prompt y sin --chat es one-shot; sin prompt o con --chat/-c entra
@@ -134,6 +135,42 @@ var tools = []Tool{
 		Name:        "run_command",
 		Description: "Ejecuta un comando de shell en la máquina del usuario y devuelve su salida (stdout+stderr). El usuario confirma antes de correr.",
 		Parameters:  strSchema([]string{"command"}, prop{"command", "El comando a ejecutar"}),
+	}},
+}
+
+// okfDir, si no está vacío, es el bundle OKF de contexto. Las tools okf_* operan
+// dentro de él (rutas bundle-relativas, con leading / al estilo OKF).
+var okfDir = ""
+
+// okfTools se agregan a `tools` solo cuando hay un bundle (--okf). Gestión de
+// contexto por divulgación progresiva: el índice va en el system prompt, los
+// conceptos se leen bajo demanda, y el agente puede curar el bundle.
+var okfTools = []Tool{
+	{Type: "function", Function: ToolFunction{
+		Name:        "okf_read",
+		Description: "Lee un concepto del bundle OKF de contexto (frontmatter + cuerpo). path es bundle-relativo (ej: /metrica-ventas.md).",
+		Parameters:  strSchema([]string{"path"}, prop{"path", "Ruta bundle-relativa del concepto"}),
+	}},
+	{Type: "function", Function: ToolFunction{
+		Name:        "okf_search",
+		Description: "Busca un regex dentro del bundle OKF (tipo grep). Devuelve archivo:línea: contenido.",
+		Parameters:  strSchema([]string{"pattern"}, prop{"pattern", "Patrón regex a buscar en el bundle"}),
+	}},
+	{Type: "function", Function: ToolFunction{
+		Name:        "okf_write",
+		Description: "Crea o actualiza un concepto OKF en el bundle: escribe frontmatter (type obligatorio) + cuerpo markdown. El usuario confirma antes.",
+		Parameters: strSchema([]string{"path", "type", "body"},
+			prop{"path", "Ruta bundle-relativa (ej: /clientes/acme.md)"},
+			prop{"type", "type OKF, obligatorio (ej: Métrica, Playbook, API Endpoint)"},
+			prop{"title", "Título legible"},
+			prop{"description", "Resumen de una frase"},
+			prop{"tags", "Tags separados por coma"},
+			prop{"body", "Cuerpo markdown del concepto"}),
+	}},
+	{Type: "function", Function: ToolFunction{
+		Name:        "okf_log",
+		Description: "Anota una entrada fechada en el log.md del bundle (historial de cambios OKF). El usuario confirma antes.",
+		Parameters:  strSchema([]string{"entry"}, prop{"entry", "La línea a registrar en el historial"}),
 	}},
 }
 
@@ -276,6 +313,69 @@ func execTool(tc ToolCall, autoYes bool) string {
 		}
 		return clip(runShell(command))
 
+	case "okf_read":
+		if okfDir == "" {
+			return "ERROR: no hay bundle OKF (arrancá con --okf <dir>)"
+		}
+		p, _ := tc.Arguments["path"].(string)
+		full, err := okfResolve(p)
+		if err != nil {
+			return "ERROR: " + err.Error()
+		}
+		data, err := os.ReadFile(full)
+		if err != nil {
+			return "ERROR: " + err.Error()
+		}
+		return clip(string(data))
+
+	case "okf_search":
+		if okfDir == "" {
+			return "ERROR: no hay bundle OKF (arrancá con --okf <dir>)"
+		}
+		pattern, _ := tc.Arguments["pattern"].(string)
+		if pattern == "" {
+			return "ERROR: falta 'pattern'"
+		}
+		return doSearch(pattern, okfDir)
+
+	case "okf_write":
+		if okfDir == "" {
+			return "ERROR: no hay bundle OKF (arrancá con --okf <dir>)"
+		}
+		p, _ := tc.Arguments["path"].(string)
+		typ, _ := tc.Arguments["type"].(string)
+		if p == "" || typ == "" {
+			return "ERROR: 'path' y 'type' son obligatorios (type es el campo requerido de OKF)"
+		}
+		full, err := okfResolve(p)
+		if err != nil {
+			return "ERROR: " + err.Error()
+		}
+		doc := buildOKFDoc(tc.Arguments)
+		if !autoYes && !confirm(fmt.Sprintf("\n  ⚠  el modelo quiere ESCRIBIR el concepto OKF %s (type: %s, %d bytes):\n      %s\n  ¿permitir? [y/N] ", p, typ, len(doc), oneLine(doc, 90))) {
+			return "El usuario DENEGÓ la escritura de este concepto."
+		}
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return "ERROR: " + err.Error()
+		}
+		if err := os.WriteFile(full, []byte(doc), 0o644); err != nil {
+			return "ERROR: " + err.Error()
+		}
+		return fmt.Sprintf("OK: concepto escrito en %s (%d bytes)", p, len(doc))
+
+	case "okf_log":
+		if okfDir == "" {
+			return "ERROR: no hay bundle OKF (arrancá con --okf <dir>)"
+		}
+		entry, _ := tc.Arguments["entry"].(string)
+		if entry == "" {
+			return "ERROR: falta 'entry'"
+		}
+		if !autoYes && !confirm(fmt.Sprintf("\n  ⚠  el modelo quiere anotar en log.md:\n      %s\n  ¿permitir? [y/N] ", oneLine(entry, 90))) {
+			return "El usuario DENEGÓ la anotación en el log."
+		}
+		return okfAppendLog(entry)
+
 	default:
 		return "ERROR: herramienta desconocida: " + tc.Name
 	}
@@ -398,6 +498,158 @@ func doSearch(pattern, root string) string {
 		res += fmt.Sprintf("…(cortado en %d coincidencias)\n", maxHits)
 	}
 	return clip(res)
+}
+
+// ── OKF: bundle de conocimiento como contexto ────────────────────────────────
+
+// okfResolve mapea una ruta bundle-relativa a una ruta real, confinada al bundle
+// (no deja escapar con ../).
+func okfResolve(rel string) (string, error) {
+	rel = strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(rel)), "/")
+	if rel == "" {
+		return "", fmt.Errorf("path vacío")
+	}
+	full := filepath.Join(okfDir, filepath.FromSlash(rel))
+	absDir, err1 := filepath.Abs(okfDir)
+	absFull, err2 := filepath.Abs(full)
+	if err1 != nil || err2 != nil {
+		return "", fmt.Errorf("ruta inválida")
+	}
+	if absFull != absDir && !strings.HasPrefix(absFull, absDir+string(os.PathSeparator)) {
+		return "", fmt.Errorf("la ruta se sale del bundle OKF")
+	}
+	return full, nil
+}
+
+type okfMeta struct{ typ, title, desc string }
+
+// parseFrontmatter lee el YAML del tope de un concepto OKF (parser mínimo: flat
+// key: value). Conforma si `type` no está vacío.
+func parseFrontmatter(content string) (okfMeta, bool) {
+	if !strings.HasPrefix(content, "---") {
+		return okfMeta{}, false
+	}
+	rest := content[3:]
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return okfMeta{}, false
+	}
+	var m okfMeta
+	for _, line := range strings.Split(rest[:end], "\n") {
+		line = strings.TrimSpace(line)
+		i := strings.Index(line, ":")
+		if i <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:i])
+		val := strings.Trim(strings.TrimSpace(line[i+1:]), `"'`)
+		switch key {
+		case "type":
+			m.typ = val
+		case "title":
+			m.title = val
+		case "description":
+			m.desc = val
+		}
+	}
+	return m, m.typ != ""
+}
+
+// buildOKFIndex arma el listado de conceptos (type · title — description) para
+// la divulgación progresiva. Salta los reservados index.md y log.md.
+func buildOKFIndex() string {
+	var b strings.Builder
+	count := 0
+	filepath.WalkDir(okfDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		low := strings.ToLower(d.Name())
+		if !strings.HasSuffix(low, ".md") || low == "index.md" || low == "log.md" {
+			return nil
+		}
+		data, e := os.ReadFile(p)
+		if e != nil {
+			return nil
+		}
+		rel, _ := filepath.Rel(okfDir, p)
+		rel = "/" + filepath.ToSlash(rel)
+		m, ok := parseFrontmatter(string(data))
+		if ok {
+			line := "- " + rel + " — type: " + m.typ
+			if m.title != "" {
+				line += " · " + m.title
+			}
+			if m.desc != "" {
+				line += " — " + m.desc
+			}
+			b.WriteString(line + "\n")
+		} else {
+			b.WriteString("- " + rel + " (sin frontmatter OKF)\n")
+		}
+		count++
+		return nil
+	})
+	if count == 0 {
+		return "(el bundle no tiene conceptos todavía)"
+	}
+	return b.String()
+}
+
+// okfSystemAddon es lo que se suma al system prompt: el índice + cómo usar las tools.
+func okfSystemAddon() string {
+	return "\n\nTenés un bundle de conocimiento OKF montado como contexto. Índice de conceptos (leé el que necesites con okf_read; NO inventes su contenido):\n" +
+		buildOKFIndex() +
+		"\nBuscá dentro del bundle con okf_search. Curá el conocimiento con okf_write (crear/actualizar un concepto; type es obligatorio) y okf_log (anotar un cambio). Cuando aprendas algo reutilizable, guardalo como concepto."
+}
+
+// buildOKFDoc arma un concepto OKF válido (frontmatter con type obligatorio +
+// timestamp ISO 8601 + cuerpo) a partir de los argumentos de la tool.
+func buildOKFDoc(args map[string]any) string {
+	get := func(k string) string { s, _ := args[k].(string); return strings.TrimSpace(s) }
+	var b strings.Builder
+	b.WriteString("---\n")
+	b.WriteString("type: " + get("type") + "\n")
+	if v := get("title"); v != "" {
+		b.WriteString("title: " + v + "\n")
+	}
+	if v := get("description"); v != "" {
+		b.WriteString("description: " + v + "\n")
+	}
+	if v := get("tags"); v != "" {
+		var ts []string
+		for _, t := range strings.Split(v, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				ts = append(ts, t)
+			}
+		}
+		if len(ts) > 0 {
+			b.WriteString("tags: [" + strings.Join(ts, ", ") + "]\n")
+		}
+	}
+	b.WriteString("timestamp: " + time.Now().UTC().Format(time.RFC3339) + "\n")
+	b.WriteString("---\n\n")
+	body, _ := args["body"].(string)
+	b.WriteString(strings.TrimRight(body, "\n") + "\n")
+	return b.String()
+}
+
+// okfAppendLog agrega una entrada fechada al log.md del bundle.
+func okfAppendLog(entry string) string {
+	full, err := okfResolve("log.md")
+	if err != nil {
+		return "ERROR: " + err.Error()
+	}
+	line := "- " + time.Now().UTC().Format("2006-01-02") + ": " + strings.TrimSpace(entry) + "\n"
+	f, err := os.OpenFile(full, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return "ERROR: " + err.Error()
+	}
+	defer f.Close()
+	if _, err := f.WriteString(line); err != nil {
+		return "ERROR: " + err.Error()
+	}
+	return "OK: anotado en log.md — " + strings.TrimRight(line, "\n")
 }
 
 func runShell(command string) string {
@@ -602,22 +854,43 @@ func main() {
 
 	autoYes, chat, stream := false, false, false
 	var parts []string
-	for _, a := range os.Args[1:] {
-		switch a {
-		case "--yes", "-y":
+	args := os.Args[1:]
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--yes" || a == "-y":
 			autoYes = true
-		case "--chat", "-c":
+		case a == "--chat" || a == "-c":
 			chat = true
-		case "--stream", "-s":
+		case a == "--stream" || a == "-s":
 			stream = true
+		case a == "--okf":
+			if i+1 < len(args) {
+				i++
+				okfDir = args[i]
+			}
+		case strings.HasPrefix(a, "--okf="):
+			okfDir = a[len("--okf="):]
 		default:
 			parts = append(parts, a)
 		}
 	}
 	prompt := strings.TrimSpace(strings.Join(parts, " "))
 
+	// Bundle OKF de contexto: registra las tools okf_* y suma el índice (no el
+	// contenido) al system prompt — divulgación progresiva.
+	sys := systemPrompt
+	if okfDir != "" {
+		if info, err := os.Stat(okfDir); err != nil || !info.IsDir() {
+			fatal("--okf: no es un directorio: " + okfDir)
+		}
+		tools = append(tools, okfTools...)
+		sys += okfSystemAddon()
+	}
+	sysMsg := Message{Role: "system", Content: sys}
+
 	client := &http.Client{Timeout: 6 * time.Minute}
-	messages := []Message{{Role: "system", Content: systemPrompt}}
+	messages := []Message{sysMsg}
 
 	// One-shot: hay prompt y NO se pidió chat.
 	if prompt != "" && !chat {
@@ -653,7 +926,7 @@ func main() {
 		case "/exit", "/quit":
 			return
 		case "/reset":
-			messages = []Message{{Role: "system", Content: systemPrompt}}
+			messages = []Message{sysMsg}
 			fmt.Println("\x1b[90m(historial reiniciado)\x1b[0m")
 			continue
 		case "/help":

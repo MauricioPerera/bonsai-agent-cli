@@ -39,6 +39,12 @@ bonsai-agent.exe -c -s                                           # chat + stream
 defecto; con `stream:true` el worker publica el texto parcial y `/api/generate`
 lo relaya por **Server-Sent Events**.
 
+```sh
+# gestión de contexto con un bundle OKF
+bonsai-agent.exe --okf example-okf "¿cómo se calcula la métrica de ventas?"
+bonsai-agent.exe --okf ./mi-kb -c   # chat con la base de conocimiento montada
+```
+
 **Modos:** con prompt y sin `--chat` es one-shot; sin prompt (o con `--chat`/`-c`)
 entra al chat interactivo, que **recuerda la conversación** entre turnos —incluidos
 los resultados de las herramientas. Comandos dentro del chat: `/exit`, `/reset`
@@ -75,6 +81,23 @@ máximo 100 líneas y salta `.git`, `node_modules`, binarios y archivos de más 
    verbatim) + un `{role:"tool","content":"<resultado>"}` por llamada, y vuelve a 1.
 4. Cuando el modelo responde sin `tool_calls`, imprime el texto final. (Máximo 8
    turnos por las dudas.)
+
+## Gestión de contexto con OKF
+
+Con `--okf <dir>` el agente monta un **bundle [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)** (Open Knowledge Format) como base de conocimiento. Un bundle es un árbol de `.md`, cada uno un *concepto* con frontmatter YAML (`type` obligatorio; `title`/`description`/`tags`/`timestamp` recomendados) + cuerpo markdown.
+
+Funciona por **divulgación progresiva**: al arrancar, el agente recibe en su system prompt solo el **índice** (type · title — description de cada concepto), no el contenido — así el contexto es barato. Después lee el concepto que necesita bajo demanda. Y puede **curar** el bundle (memoria).
+
+Tools que se activan solo con `--okf`:
+
+| Tool | Qué hace | Confirmación |
+|------|----------|--------------|
+| `okf_read(path)` | lee un concepto (frontmatter + cuerpo); `path` es bundle-relativo (`/ventas.md`) | no |
+| `okf_search(pattern)` | grep dentro del bundle | no |
+| `okf_write(path, type, title?, description?, tags?, body)` | crea/actualiza un concepto OKF válido (frontmatter + `timestamp` ISO 8601 automático) | **`[y/N]`** |
+| `okf_log(entry)` | anota una entrada fechada en `log.md` (historial de cambios) | **`[y/N]`** |
+
+Las rutas están confinadas al bundle (no se puede escapar con `../`). Hay un bundle de ejemplo en [`example-okf/`](example-okf).
 
 ## Seguridad
 
