@@ -12,6 +12,8 @@
 //	bonsai-agent --chat            (chat interactivo: mantiene la conversación)
 //	bonsai-agent --stream "..."    (imprime la respuesta a medida que se genera)
 //	bonsai-agent --okf ./kb "..."  (monta un bundle OKF como contexto/memoria)
+//	bonsai-agent --system reglas.md "..."  (instrucciones globales; también auto-carga AGENT.md)
+//	bonsai-agent --skills ./skills "..."   (biblioteca de skills leídos bajo demanda)
 //	bonsai-agent --yes "corré los tests"   (--yes: no pide confirmación de shell)
 //
 // Modos: con prompt y sin --chat es one-shot; sin prompt o con --chat/-c entra
@@ -135,6 +137,25 @@ var tools = []Tool{
 		Name:        "run_command",
 		Description: "Ejecuta un comando de shell en la máquina del usuario y devuelve su salida (stdout+stderr). El usuario confirma antes de correr.",
 		Parameters:  strSchema([]string{"command"}, prop{"command", "El comando a ejecutar"}),
+	}},
+}
+
+// systemFile: archivo de instrucciones globales (--system) que se suma al system
+// prompt. Además, si existe AGENT.md en el dir actual, se carga automáticamente.
+var systemFile = ""
+
+// skillsDir + skills: biblioteca de skills (--skills). Cada skill es un .md con
+// name/description en frontmatter (o derivados del archivo) + cuerpo con las
+// instrucciones. El índice va al system prompt; el cuerpo se lee bajo demanda.
+var skillsDir = ""
+var skills = map[string]skillMeta{} // name en minúsculas -> skill
+
+// skillsTools se agregan solo cuando hay --skills.
+var skillsTools = []Tool{
+	{Type: "function", Function: ToolFunction{
+		Name:        "read_skill",
+		Description: "Lee las instrucciones completas de un skill por su nombre, para saber cómo actuar en cierta tarea. Usalo cuando la tarea coincida con la descripción de un skill del índice.",
+		Parameters:  strSchema([]string{"name"}, prop{"name", "Nombre del skill"}),
 	}},
 }
 
@@ -320,6 +341,17 @@ func execTool(tc ToolCall, autoYes bool) string {
 			return "El usuario DENEGÓ la ejecución de este comando."
 		}
 		return clip(runShell(command))
+
+	case "read_skill":
+		if skillsDir == "" {
+			return "ERROR: no hay skills (arrancá con --skills <dir>)"
+		}
+		name, _ := tc.Arguments["name"].(string)
+		s, ok := skills[strings.ToLower(strings.TrimSpace(name))]
+		if !ok {
+			return "ERROR: no existe el skill: " + name
+		}
+		return clip(s.body)
 
 	case "okf_read":
 		if okfDir == "" {
@@ -677,6 +709,81 @@ func okfAppendLog(entry string) string {
 	return "OK: anotado en log.md — " + strings.TrimRight(line, "\n")
 }
 
+// ── skills: biblioteca de instrucciones cargadas bajo demanda ────────────────
+
+type skillMeta struct{ name, desc, body string }
+
+// loadSkill parsea un .md de skill: frontmatter opcional (name/description) +
+// cuerpo (las instrucciones). Sin frontmatter: name = archivo, desc = 1ª línea.
+func loadSkill(path string) skillMeta {
+	data, _ := os.ReadFile(path)
+	content := string(data)
+	m := skillMeta{
+		name: strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
+		body: content,
+	}
+	if strings.HasPrefix(content, "---") {
+		rest := content[3:]
+		if end := strings.Index(rest, "\n---"); end >= 0 {
+			for _, line := range strings.Split(rest[:end], "\n") {
+				i := strings.Index(line, ":")
+				if i <= 0 {
+					continue
+				}
+				k := strings.TrimSpace(line[:i])
+				v := strings.Trim(strings.TrimSpace(line[i+1:]), `"'`)
+				switch k {
+				case "name":
+					if v != "" {
+						m.name = v
+					}
+				case "description":
+					m.desc = v
+				}
+			}
+			m.body = strings.TrimLeft(rest[end+4:], "\n")
+		}
+	}
+	if m.desc == "" {
+		for _, line := range strings.Split(m.body, "\n") {
+			if line = strings.TrimSpace(strings.TrimLeft(line, "# ")); line != "" {
+				m.desc = line
+				break
+			}
+		}
+	}
+	return m
+}
+
+// loadSkills recorre el dir y llena el mapa global `skills` (name en minúsculas).
+func loadSkills(dir string) {
+	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(strings.ToLower(d.Name()), ".md") {
+			return nil
+		}
+		s := loadSkill(p)
+		skills[strings.ToLower(s.name)] = s
+		return nil
+	})
+}
+
+// skillsSystemAddon: el índice de skills + cómo usarlos, para el system prompt.
+func skillsSystemAddon() string {
+	if len(skills) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n# Skills disponibles\nSon instrucciones de CÓMO actuar en ciertas tareas. Cuando la tarea del usuario coincida con la descripción de un skill, leé sus instrucciones con read_skill(name) y SEGUILAS. Índice:\n")
+	for _, s := range skills {
+		b.WriteString("- " + s.name)
+		if s.desc != "" {
+			b.WriteString(": " + s.desc)
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // saveHints: pistas de que el usuario pidió persistir algo en el bundle OKF.
 var saveHints = []string{
 	"guard", "anot", "registr", "actualiz", "persist", "sav",
@@ -940,15 +1047,54 @@ func main() {
 			}
 		case strings.HasPrefix(a, "--okf="):
 			okfDir = a[len("--okf="):]
+		case a == "--skills":
+			if i+1 < len(args) {
+				i++
+				skillsDir = args[i]
+			}
+		case strings.HasPrefix(a, "--skills="):
+			skillsDir = a[len("--skills="):]
+		case a == "--system":
+			if i+1 < len(args) {
+				i++
+				systemFile = args[i]
+			}
+		case strings.HasPrefix(a, "--system="):
+			systemFile = a[len("--system="):]
 		default:
 			parts = append(parts, a)
 		}
 	}
 	prompt := strings.TrimSpace(strings.Join(parts, " "))
 
+	sys := systemPrompt
+
+	// Instrucciones globales: AGENT.md del dir actual (auto) + --system <archivo>.
+	// Siempre activas — dicen cómo actuar.
+	if b, err := os.ReadFile("AGENT.md"); err == nil && len(strings.TrimSpace(string(b))) > 0 {
+		sys += "\n\n# Instrucciones del proyecto (AGENT.md)\n" + strings.TrimSpace(string(b))
+	}
+	if systemFile != "" {
+		b, err := os.ReadFile(systemFile)
+		if err != nil {
+			fatal("--system: no pude leer " + systemFile + ": " + err.Error())
+		}
+		sys += "\n\n# Instrucciones\n" + strings.TrimSpace(string(b))
+	}
+
+	// Skills: biblioteca de comportamientos leídos bajo demanda (índice al prompt,
+	// cuerpo con read_skill). Divulgación progresiva, como OKF.
+	if skillsDir != "" {
+		if info, err := os.Stat(skillsDir); err != nil || !info.IsDir() {
+			fatal("--skills: no es un directorio: " + skillsDir)
+		}
+		loadSkills(skillsDir)
+		tools = append(tools, skillsTools...)
+		sys += skillsSystemAddon()
+	}
+
 	// Bundle OKF de contexto: registra las tools okf_* y suma el índice (no el
 	// contenido) al system prompt — divulgación progresiva.
-	sys := systemPrompt
 	if okfDir != "" {
 		if info, err := os.Stat(okfDir); err != nil || !info.IsDir() {
 			fatal("--okf: no es un directorio: " + okfDir)

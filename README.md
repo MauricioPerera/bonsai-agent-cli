@@ -11,8 +11,9 @@ Un solo `.exe`, sin runtime: nada de Python/Node ni políticas de ejecución de
 PowerShell.
 
 **Qué trae:**
-- **8 herramientas** de sistema (leer/buscar/escribir/editar archivos, HTTP, shell) + **4 de OKF**.
+- **8 herramientas** de sistema (leer/buscar/escribir/editar archivos, HTTP, shell), **4 de OKF** y `read_skill`.
 - **Modos:** one-shot, **chat** interactivo con memoria, y **streaming** de la respuesta token a token.
+- **Cómo actuar:** instrucciones globales (`AGENT.md` / `--system`) + **skills** leídos bajo demanda.
 - **Gestión de contexto OKF**: montás un bundle de conocimiento como base/memoria del agente.
 
 ## Compilar
@@ -39,6 +40,8 @@ Verificá con `GET /api/status` que diga `model_loaded: true`.
 | *(prompt como argumento)* | one-shot: una pregunta → una respuesta |
 | `--chat`, `-c` | chat interactivo (mantiene la conversación entre turnos) |
 | `--stream`, `-s` | imprime la respuesta a medida que se genera (SSE) |
+| `--system <file>` | instrucciones globales que se suman al system prompt (también auto-carga `AGENT.md` del dir actual) |
+| `--skills <dir>` | biblioteca de skills leídos bajo demanda |
 | `--okf <dir>` | monta un bundle OKF como contexto/memoria |
 | `--yes`, `-y` | no pide confirmación `[y/N]` para las herramientas que modifican el sistema |
 
@@ -86,6 +89,37 @@ Siempre disponibles:
 a 8 KB por herramienta (y `http_get` limita el cuerpo a lo mismo). `glob` devuelve
 hasta 200 archivos; `search` hasta 100 líneas y salta `.git`, `node_modules`,
 binarios y archivos de más de 1 MB.
+
+## Cómo indicarle al agente cómo actuar
+
+Dos niveles, combinables:
+
+**Instrucciones globales (siempre activas).** Un markdown que se suma al system
+prompt — rol, tono, reglas, workflow. Dos fuentes:
+- `AGENT.md` en el directorio actual se **auto-carga** (estilo CLAUDE.md).
+- `--system <archivo>` suma otro archivo.
+
+```sh
+bonsai-agent.exe --system reglas.md "arreglá el bug del login"
+# o simplemente tené un AGENT.md en la carpeta y correlo sin flags
+```
+
+**Skills (bajo demanda).** Una carpeta donde cada `.md` es un skill: instrucciones
+de cómo actuar en cierta tarea. Frontmatter opcional `name`/`description` (si no,
+se derivan del archivo y su primera línea) + cuerpo con las instrucciones. Igual
+que OKF, funciona por **divulgación progresiva**: el agente recibe el **índice**
+(name · description) en el system prompt y lee el skill relevante con
+`read_skill(name)` cuando la tarea coincide.
+
+```sh
+bonsai-agent.exe --skills example-skills "contame algo hablando como pirata"
+```
+
+| Tool | Qué hace | Confirmación |
+|------|----------|--------------|
+| `read_skill(name)` | devuelve las instrucciones completas de un skill (se activa con `--skills`) | no |
+
+Hay skills de ejemplo en [`example-skills/`](example-skills).
 
 ## Gestión de contexto con OKF
 

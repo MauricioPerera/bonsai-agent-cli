@@ -122,6 +122,39 @@ func TestOkfWriteOverwriteNotice(t *testing.T) {
 	}
 }
 
+// Skills: parseo (con y sin frontmatter), read_skill y el índice.
+func TestSkills(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pirata.md"), []byte("---\nname: pirata\ndescription: hablar como pirata\n---\n\n# Instrucciones\n\nUsá ¡Arrr! y terminá con ancla."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sinfront.md"), []byte("# Resumen guay\n\nInstrucción sin frontmatter."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	skills = map[string]skillMeta{}
+	skillsDir = dir
+	loadSkills(dir)
+
+	if len(skills) != 2 {
+		t.Fatalf("esperaba 2 skills, got %d", len(skills))
+	}
+	if p := skills["pirata"]; p.name != "pirata" || p.desc != "hablar como pirata" || !strings.Contains(p.body, "Arrr") {
+		t.Fatalf("skill pirata mal parseado: %+v", p)
+	}
+	if s := skills["sinfront"]; s.name != "sinfront" || s.desc != "Resumen guay" {
+		t.Fatalf("skill sin frontmatter mal: %+v", s)
+	}
+	if res := execTool(ToolCall{Name: "read_skill", Arguments: map[string]any{"name": "Pirata"}}, true); !strings.Contains(res, "Arrr") {
+		t.Fatalf("read_skill no devolvió el cuerpo (case-insensitive): %q", res)
+	}
+	if res := execTool(ToolCall{Name: "read_skill", Arguments: map[string]any{"name": "nope"}}, true); !strings.Contains(res, "no existe") {
+		t.Fatalf("read_skill debería fallar con skill inexistente: %q", res)
+	}
+	if idx := skillsSystemAddon(); !strings.Contains(idx, "pirata") || !strings.Contains(idx, "sinfront") {
+		t.Fatalf("el índice no lista todos los skills: %q", idx)
+	}
+}
+
 func TestLastUserWantsSave(t *testing.T) {
 	yes := []string{"guardá esto", "creá un concepto nuevo", "actualizá la métrica", "anotá en el log", "documentá el proceso"}
 	no := []string{"¿qué conceptos hay?", "leé el playbook", "explicá qué es RAG"}
