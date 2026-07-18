@@ -47,13 +47,16 @@ cargado** y el secreto pegado (es el worker que genera). Verificá con
 | `list_dir(path)` | lista un directorio (default: el actual) | no (solo lectura) |
 | `read_file(path)` | lee un archivo de texto | no (solo lectura) |
 | `glob(pattern)` | busca archivos por patrón — `*`, `?`, `[..]` y `**` recursivo (ej: `**/*.go`) | no (solo lectura) |
+| `search(pattern, path)` | busca un regex (RE2) *dentro* de archivos, recursivo — devuelve `archivo:línea: contenido` | no (solo lectura) |
 | `http_get(url)` | hace un GET HTTP y devuelve status + content-type + cuerpo | no (solo lectura) |
 | `write_file(path, content)` | escribe/sobrescribe un archivo de texto | **sí, `[y/N]`** (salvo `--yes`) |
 | `run_command(command)` | ejecuta un comando de shell y devuelve su salida | **sí, `[y/N]`** (salvo `--yes`) |
 
 `run_command` usa `cmd /c` en Windows y `sh -c` en el resto. La salida se
 trunca a 8 KB por herramienta (y `http_get` limita el cuerpo a lo mismo) para no
-saturar el contexto. `glob` devuelve como máximo 200 coincidencias.
+saturar el contexto. `glob` devuelve como máximo 200 archivos; `search` como
+máximo 100 líneas y salta `.git`, `node_modules`, binarios y archivos de más de
+1 MB.
 
 ## Cómo funciona el loop
 

@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -106,6 +107,11 @@ var tools = []Tool{
 		Name:        "glob",
 		Description: "Busca archivos por patrón. Soporta * ? [..] y ** (recursivo). Ej: *.go, src/**/*.js.",
 		Parameters:  strSchema([]string{"pattern"}, prop{"pattern", "Patrón glob a buscar"}),
+	}},
+	{Type: "function", Function: ToolFunction{
+		Name:        "search",
+		Description: "Busca un patrón (regex RE2) dentro de archivos, recursivo. Devuelve archivo:línea: contenido. path opcional (default: el actual).",
+		Parameters:  strSchema([]string{"pattern"}, prop{"pattern", "Patrón regex a buscar"}, prop{"path", "Archivo o carpeta donde buscar"}),
 	}},
 	{Type: "function", Function: ToolFunction{
 		Name:        "http_get",
@@ -188,6 +194,17 @@ func execTool(tc ToolCall, autoYes bool) string {
 			matches = matches[:maxMatches]
 		}
 		return strings.Join(matches, "\n") + note
+
+	case "search":
+		pattern, _ := tc.Arguments["pattern"].(string)
+		root, _ := tc.Arguments["path"].(string)
+		if pattern == "" {
+			return "ERROR: falta 'pattern'"
+		}
+		if root == "" {
+			root = "."
+		}
+		return doSearch(pattern, root)
 
 	case "http_get":
 		u, _ := tc.Arguments["url"].(string)
@@ -282,6 +299,68 @@ func httpGet(u string) string {
 	return fmt.Sprintf("HTTP %d · %s\n%s", resp.StatusCode, resp.Header.Get("Content-Type"), clip(string(body)))
 }
 
+// doSearch busca un regex en archivos de texto bajo root, recursivo, tipo grep.
+// Salta .git y node_modules, archivos binarios y los de más de 1 MB.
+func doSearch(pattern, root string) string {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return "ERROR: patrón inválido: " + err.Error()
+	}
+	const maxHits = 100
+	var b strings.Builder
+	hits := 0
+	truncated := false
+
+	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if n := d.Name(); n == ".git" || n == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if hits >= maxHits {
+			truncated = true
+			return filepath.SkipAll
+		}
+		if info, e := d.Info(); e == nil && info.Size() > 1<<20 {
+			return nil // > 1 MB: se salta
+		}
+		data, e := os.ReadFile(p)
+		if e != nil || bytes.IndexByte(data, 0) >= 0 {
+			return nil // ilegible o binario
+		}
+		lineNo := 0
+		for _, line := range strings.Split(string(data), "\n") {
+			lineNo++
+			if re.MatchString(line) {
+				line = strings.TrimRight(line, "\r")
+				if len(line) > 200 {
+					line = line[:200] + "…"
+				}
+				fmt.Fprintf(&b, "%s:%d: %s\n", filepath.ToSlash(p), lineNo, line)
+				hits++
+				if hits >= maxHits {
+					truncated = true
+					break
+				}
+			}
+		}
+		return nil
+	})
+
+	if hits == 0 {
+		return "(sin coincidencias)"
+	}
+	res := b.String()
+	if truncated {
+		res += fmt.Sprintf("…(cortado en %d coincidencias)\n", maxHits)
+	}
+	return clip(res)
+}
+
 func runShell(command string) string {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
@@ -309,6 +388,7 @@ const systemPrompt = `Sos un agente que corre en la máquina del usuario. Dispon
 - list_dir(path): lista un directorio.
 - read_file(path): lee un archivo de texto.
 - glob(pattern): busca archivos por patrón (soporta ** recursivo).
+- search(pattern, path): busca un regex DENTRO de archivos (tipo grep), recursivo.
 - http_get(url): hace un GET HTTP y devuelve el cuerpo.
 - write_file(path, content): escribe un archivo (el usuario lo confirma).
 - run_command(command): ejecuta un comando de shell (el usuario lo confirma).
