@@ -263,11 +263,19 @@ func execTool(tc ToolCall, autoYes bool) string {
 		if p == "" {
 			return "ERROR: falta 'path'"
 		}
-		if !autoYes && !confirm(fmt.Sprintf("\n  ⚠  el modelo quiere ESCRIBIR %d bytes en:\n      %s\n  ¿permitir? [y/N] ", len(content), p)) {
+		existed, oldSize := statFile(p)
+		verb, note := "ESCRIBIR", ""
+		if existed {
+			verb, note = "SOBRESCRIBIR", fmt.Sprintf(" (ya existe, %d bytes)", oldSize)
+		}
+		if !autoYes && !confirm(fmt.Sprintf("\n  ⚠  el modelo quiere %s %d bytes en:\n      %s%s\n  ¿permitir? [y/N] ", verb, len(content), p, note)) {
 			return "El usuario DENEGÓ la escritura de este archivo."
 		}
 		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 			return "ERROR: " + err.Error()
+		}
+		if existed {
+			return fmt.Sprintf("OK: SOBRESCRITO %s (%d bytes, antes %d)", p, len(content), oldSize)
 		}
 		return fmt.Sprintf("OK: escrito %s (%d bytes)", p, len(content))
 
@@ -352,7 +360,12 @@ func execTool(tc ToolCall, autoYes bool) string {
 			return "ERROR: " + err.Error()
 		}
 		doc := buildOKFDoc(tc.Arguments)
-		if !autoYes && !confirm(fmt.Sprintf("\n  ⚠  el modelo quiere ESCRIBIR el concepto OKF %s (type: %s, %d bytes):\n      %s\n  ¿permitir? [y/N] ", p, typ, len(doc), oneLine(doc, 90))) {
+		existed, oldSize := statFile(full)
+		verb, note := "ESCRIBIR", ""
+		if existed {
+			verb, note = "SOBRESCRIBIR", fmt.Sprintf(" — YA EXISTE, %d bytes", oldSize)
+		}
+		if !autoYes && !confirm(fmt.Sprintf("\n  ⚠  el modelo quiere %s el concepto OKF %s%s (type: %s, %d bytes):\n      %s\n  ¿permitir? [y/N] ", verb, p, note, typ, len(doc), oneLine(doc, 90))) {
 			return "El usuario DENEGÓ la escritura de este concepto."
 		}
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
@@ -360,6 +373,9 @@ func execTool(tc ToolCall, autoYes bool) string {
 		}
 		if err := os.WriteFile(full, []byte(doc), 0o644); err != nil {
 			return "ERROR: " + err.Error()
+		}
+		if existed {
+			return fmt.Sprintf("OK: concepto SOBRESCRITO en %s (%d bytes, antes %d)", p, len(doc), oldSize)
 		}
 		return fmt.Sprintf("OK: concepto escrito en %s (%d bytes)", p, len(doc))
 
@@ -386,6 +402,15 @@ func confirm(msg string) bool {
 	fmt.Print(msg)
 	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 	return strings.TrimSpace(strings.ToLower(line)) == "y"
+}
+
+// statFile dice si un archivo existe (no dir) y su tamaño — para avisar cuándo
+// una escritura sobrescribe algo.
+func statFile(path string) (exists bool, size int64) {
+	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
+		return true, fi.Size()
+	}
+	return false, 0
 }
 
 // doGlob busca archivos por patrón. Soporta ** (recursivo) además de lo que

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -98,6 +99,26 @@ func TestNoNudgeWithoutOKF(t *testing.T) {
 	}
 	if *calls != 1 {
 		t.Fatalf("sin OKF no debería reintentar: esperaba 1 llamada, hubo %d", *calls)
+	}
+}
+
+// okf_write avisa (en el resultado) cuando pisa un concepto existente.
+func TestOkfWriteOverwriteNotice(t *testing.T) {
+	okfDir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(okfDir, "x.md"), []byte("viejo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := execTool(ToolCall{Name: "okf_write", Arguments: map[string]any{
+		"path": "/x.md", "type": "Nota", "body": "nuevo",
+	}}, true)
+	if !strings.Contains(res, "SOBRESCRITO") {
+		t.Fatalf("esperaba aviso de sobrescritura, got: %q", res)
+	}
+	res2 := execTool(ToolCall{Name: "okf_write", Arguments: map[string]any{
+		"path": "/nuevo.md", "type": "Nota", "body": "hola",
+	}}, true)
+	if strings.Contains(res2, "SOBRESCRITO") {
+		t.Fatalf("un archivo nuevo no debería avisar sobrescritura: %q", res2)
 	}
 }
 

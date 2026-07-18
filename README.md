@@ -140,6 +140,10 @@ entero de una).
   van a hacer (el comando, el path y bytes, el diff `- old / + new`) antes de
   tocar nada. `--yes` desactiva esas preguntas — usalo solo si sabés qué vas a
   pedir. Las de solo lectura corren sin preguntar.
+- **Sobrescritura visible:** `write_file` y `okf_write` avisan cuando el path ya
+  existe — la confirmación dice `SOBRESCRIBIR … (ya existe, N bytes)` y el
+  resultado `SOBRESCRITO` (así lo ves aunque uses `--yes`), por si el modelo
+  elige una ruta ocupada.
 - El modelo no ejecuta nada: propone, vos (o `--yes`) autorizás, el binario corre.
 
 ## No incluido / atribución
